@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
 
@@ -80,6 +81,8 @@ class Order(BaseModel):
     actual_delivery: Optional[str] = None
     warehouse: Optional[str] = None
     category: Optional[str] = None
+    order_type: Optional[str] = None
+    lead_time_days: Optional[int] = None
 
 class DemandForecast(BaseModel):
     id: str
@@ -89,6 +92,7 @@ class DemandForecast(BaseModel):
     forecasted_demand: int
     trend: str
     period: str
+    unit_cost: float
 
 class BacklogItem(BaseModel):
     id: str
@@ -119,6 +123,18 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockOrderItem(BaseModel):
+    sku: str
+    item_name: str
+    quantity: int
+    unit_cost: float
+
+class CreateRestockOrderRequest(BaseModel):
+    items: List[RestockOrderItem]
+    budget: float
+
+RESTOCK_LEAD_TIME_DAYS = 14
 
 # API endpoints
 @app.get("/")
@@ -160,6 +176,45 @@ def get_order(order_id: str):
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return order
+
+@app.post("/api/orders/restock", response_model=Order)
+def create_restock_order(request: CreateRestockOrderRequest):
+    """Submit a restocking order built from budget-based demand forecast recommendations"""
+    if not request.items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    existing_restock_count = len([o for o in orders if o.get("order_type") == "restock"])
+    order_number = f"RESTOCK-{existing_restock_count + 1:04d}"
+
+    order_date = datetime.now()
+    expected_delivery = order_date + timedelta(days=RESTOCK_LEAD_TIME_DAYS)
+
+    items = [
+        {
+            "sku": item.sku,
+            "name": item.item_name,
+            "quantity": item.quantity,
+            "unit_price": item.unit_cost
+        }
+        for item in request.items
+    ]
+    total_value = sum(item.quantity * item.unit_cost for item in request.items)
+
+    new_order = {
+        "id": str(len(orders) + 1),
+        "order_number": order_number,
+        "customer": "Internal Restocking",
+        "items": items,
+        "status": "Processing",
+        "order_date": order_date.isoformat(),
+        "expected_delivery": expected_delivery.isoformat(),
+        "total_value": round(total_value, 2),
+        "order_type": "restock",
+        "lead_time_days": RESTOCK_LEAD_TIME_DAYS
+    }
+
+    orders.append(new_order)
+    return new_order
 
 @app.get("/api/demand", response_model=List[DemandForecast])
 def get_demand_forecasts():
